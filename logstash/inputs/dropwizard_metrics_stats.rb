@@ -95,8 +95,8 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
         end
         event["host"] = hostname if !event.include?("host")
         event["type"] = "metricstats" if !event.include?("type") || event["type"] =~ /^\s*$/
-        event["metricshost"] ||= @host
-        event["metricsport"] ||= @port
+        event["metricshost"] ||= uri.host
+        event["metricsport"] ||= uri.port
         decorate(event)
         output_queue << event
       end
