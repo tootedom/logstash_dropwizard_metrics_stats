@@ -106,12 +106,15 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
   rescue LogStash::ShutdownSignal => e
     raise e
   rescue EOFError
-    @logger.error("Connection closed")
-  rescue Timeout::Error, Errno::EINVAL, Errno::ECONNRESET, EOFError, Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError, Net::ProtocolError => e
-    @logger.error("An error occurred. Closing connection", :exception => e,:backtrace => e.backtrace)
+    @logger.warn("Connection Reset before all data recieved.  Closing connection before retry")
+    raise e
+  rescue Errno::ECONNREFUSED,Errno::ECONNABORTED, Errno::ECONNRESET, Timeout::Error, Errno::EINVAL, EOFError, Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError, Net::ProtocolError => e
+    @logger.warn("An error occurred whilst performing metrics http request. Closing connection before retry.", :exception => e,:backtrace => e.backtrace)
+    raise e
   rescue => e
-    @logger.error("An error occurred. Closing connection",
+    @logger.warn("An unexpected error occurred during metrics http request. Closing connection before retry",
                   :exception => e, :backtrace => e.backtrace)
+    raise e
   ensure
     hostname = Socket.gethostname
     codec.respond_to?(:flush) && codec.flush do |event|
@@ -134,23 +137,33 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
           metricKey = metricKey.downcase
           metricKey.gsub!(/\./,'')
           metricKey.gsub!(/-/,'')
-          if @regexp_include_keys.length > 0
-            @regexp_include_keys.each { |regex|
+          include = false
+          exclude = false
+
+          if @regexp_includes.length > 0
+            @regexp_includes.each { |regex|
               if metricKey =~ /#{regex}/
-                stats[metricKey] = metricValue
-                break
-              end
-            }
-          elsif @regexp_excludes_keys.length > 0
-            @regexp_excludes_keys.each { |regex|
-              if metricKey =~ /#{regex}/
-                next
-              else
-                stats[metricKey] = metricValue
+                include = true
                 break
               end
             }
           else
+            include = true
+          end
+
+          if @regexp_excludes.length > 0
+            @regexp_excludes.each { |regex|
+              if metricKey =~ /#{regex}/
+                exclude = true
+                break
+              end
+            }
+          else
+            exclude = false
+          end
+
+
+          if include and !exclude
             stats[metricKey] = metricValue
           end
 
@@ -184,13 +197,11 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
 
     uri = URI(@url)
 
-    # @regexp_includes = Array.new
-    # @regexp_excludes = Array.new
-    #
-    # @logger.error("xxxxx")
-    # @regexp_exclude_keys.each { |key| @regexp_excludes << Regexp.new(key) }
-    # @regexp_include_keys.each { |key| @regexp_includes << Regexp.new(key) }
-    # @logger.error("xxxxx")
+    @regexp_includes = Array.new
+    @regexp_excludes = Array.new
+
+    @regexp_exclude_keys.each { |key| @regexp_excludes << Regexp.new(/#{key}/) }
+    @regexp_include_keys.each { |key| @regexp_includes << Regexp.new(/#{key}/) }
 
 
     while notfinished
@@ -201,12 +212,14 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
         handle_request(uri, @http, output_queue, @codec.clone)
       rescue LogStash::ShutdownSignal
         notfinished = false
-        closeHttp
-      rescue Exception => e # memcached connection error
-        closeHttp
+        closeHttp()
+      rescue Exception => e
+        closeHttp()
         case e
-          when Errno::ECONNREFUSED,Errno::ECONNABORTED,Errno::ECONNRESET
-            @logger.warn("Failed to get stats from memcached, retrying connection in #{@reconnect_period_s} seconds", :name => @host,
+          when Errno::ECONNREFUSED,Errno::ECONNABORTED,Errno::ECONNRESET,
+              EOFError, Timeout::Error, Errno::EINVAL, Errno::ECONNRESET, EOFError,
+              Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError, Net::ProtocolError
+            @logger.warn("Failed to get metrics from app #{uri.request_uri}, retrying connection in #{@reconnect_period_s} seconds", :name => @host,
                        :exception => e, :backtrace => e.backtrace)
             sleep(@reconnect_period_s)
           else
