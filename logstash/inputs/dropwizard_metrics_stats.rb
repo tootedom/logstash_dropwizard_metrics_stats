@@ -15,6 +15,8 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
 
   default :http, nil
 
+  default :notfinished, true
+
   default :codec, "line"
 
   # Enable the plugin or not
@@ -42,7 +44,7 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
   config :value_separator, :validate => :string, :default => "="
 
   # store all as events.  The default is false.  When true all the dropwizard metrics stats will be stored as events
-  config :store_all_keys, :validate => :boolean, :default => false
+  config :store_all_keys, :validate => :boolean, :default => true
 
   # regexp string for keys to include
   config :regexp_include_keys, :validate => :array, :default => [ "^gaugesjvmmemory.*$", "^gaugesjvmgc.*$", "^gaugejvmthreads.*$" ]
@@ -50,10 +52,14 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
   # regexp keys to not store
   config :regexp_exclude_keys, :validate => :array, :default => []
 
+  # the type tag for the stats
+  config :type, :validate => :string, :default => "metricstats"
+
 
 
   def initialize(*args)
     super(*args)
+    @notfinished = true
   end # def initialize
 
   public
@@ -68,7 +74,7 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
 
   private
   def handle_request(uri, http, output_queue, codec)
-    while true
+    while @notfinished
       stats = { }
       response = http.request(Net::HTTP::Get.new(uri.request_uri))
       statsMap = JSON.parse(response.body)
@@ -94,13 +100,12 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
           }
         end
         event["host"] = hostname if !event.include?("host")
-        event["type"] = "metricstats" if !event.include?("type") || event["type"] =~ /^\s*$/
+        event["type"] = @type if !event.include?("type") || event["type"] =~ /^\s*$/
         event["metricshost"] ||= uri.host
         event["metricsport"] ||= uri.port
         decorate(event)
         output_queue << event
       end
-
       sleep(@poll_period_s)
     end # loop do
   rescue LogStash::ShutdownSignal => e
@@ -119,7 +124,7 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
     hostname = Socket.gethostname
     codec.respond_to?(:flush) && codec.flush do |event|
       event["host"] = hostname if !event.include?("host")
-      event["type"] = "metricstats" if !event.include?("type") || event["type"] =~ /^\s*$/
+      event["type"] = @type if !event.include?("type") || event["type"] =~ /^\s*$/
       event["metricshost"] ||= uri.host
       event["metricsport"] ||= uri.port
       decorate(event)
@@ -193,7 +198,6 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
     if @enabled == false
       return
     end
-    notfinished = true
 
     uri = URI(@url)
 
@@ -203,15 +207,14 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
     @regexp_exclude_keys.each { |key| @regexp_excludes << Regexp.new(/#{key}/) }
     @regexp_include_keys.each { |key| @regexp_includes << Regexp.new(/#{key}/) }
 
-
-    while notfinished
+    while @notfinished
       begin
         @http = Net::HTTP.new(uri.host, uri.port)
         @http.open_timeout = @connect_timeout_s # in seconds
         @http.read_timeout = @request_timeout_s # in seconds
         handle_request(uri, @http, output_queue, @codec.clone)
       rescue LogStash::ShutdownSignal
-        notfinished = false
+        @notfinished = false
         closeHttp()
       rescue Exception => e
         closeHttp()
@@ -223,7 +226,9 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
                        :exception => e, :backtrace => e.backtrace)
             sleep(@reconnect_period_s)
           else
-            raise e
+            @logger.warn("Failed to get metrics from app #{uri.request_uri}, due to unexpected exception, retrying connection in #{@reconnect_period_s} seconds", :name => @host,
+                         :exception => e, :backtrace => e.backtrace)
+            sleep(@reconnect_period_s)
         end
       end
     end # loop
@@ -243,7 +248,10 @@ class LogStash::Inputs::DropwizardMetricsStats < LogStash::Inputs::Base
   end
 
   public
-  def teardown    
+  def teardown
+    @notfinished = false
+    closeHttp()
+    finished
   end # def teardown
 end # class LogStash::Inputs::DropwizardMetricsStats
 
